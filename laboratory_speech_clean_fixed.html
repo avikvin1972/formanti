@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="ru" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="google" content="notranslate">
+<title>Лаборатория — анализ речи</title>
+<style>
+:root{--bg:#f6f8f9;--fg:#15232b;--mut:#56666e;--card:#fff;--line:#c9d5da;--acc:#1c5f8a;--ref:#d85a30}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1a20;--fg:#e6eef1;--mut:#9fb0b8;--card:#17262d;--line:#2b3d46;--acc:#7cc0ea;--ref:#ff9a6b}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,sans-serif}
+main{max-width:720px;margin:auto;padding:16px 14px 44px}
+h1{font-size:1.3rem;margin:0 0 10px}h2{font-size:1rem;margin:18px 0 6px}
+button,input[type=file]{font:inherit;padding:9px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);margin:4px 6px 4px 0}
+button.p,.on{background:var(--acc);color:#fff;border:0;font-weight:600}
+button:disabled{opacity:.55}canvas{width:100%;display:block;background:var(--card);border-radius:8px;border:1px solid var(--line)}
+input[type=range]{width:100%}.m,small{color:var(--mut)}.status{white-space:pre-line}
+.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px;margin-top:10px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.metric{padding:7px;border:1px solid var(--line);border-radius:7px}
+.metric b{display:block;font-size:1.05rem}
+@media(max-width:520px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<h1>Лаборатория — анализ речи</h1>
+
+<div class="card">
+<input id="fi" type="file" accept="audio/*">
+<p id="st" class="m status">Выберите аудиофайл.</p>
+</div>
+
+<div id="ws" hidden class="card">
+<canvas id="cw" width="720" height="150"></canvas>
+<label>Начало<input id="ra" type="range" min="0" max="100" value="0"></label>
+<label>Конец<input id="rb" type="range" min="0" max="100" value="100"></label>
+<button id="pl">Прослушать фрагмент</button>
+
+<div id="f0box" class="card" style="margin-top:10px;display:block!important">
+<h2 style="margin-top:0">F0 — основной параметр</h2>
+<p class="m" style="margin:4px 0 8px">F0 — частота основного тона. Гармоники рассчитываются непосредственно из F0: Hn = n × F0.</p>
+<label>Положение для F0 и спектра<input id="rc" type="range" min="0" max="100" value="50"></label>
+<div class="grid">
+<div class="metric"><span class="m">F0 выбранной точки</span><b id="f0v">—</b></div>
+<div class="metric"><span class="m">Медианная F0</span><b id="f0med">—</b></div>
+<div class="metric"><span class="m">Озвученные кадры</span><b id="voiced">—</b></div>
+</div>
+<p id="harm" class="m status" style="margin-bottom:4px"></p>
+</div>
+
+<div id="tabs"></div>
+<div id="fr"><span class="m">Предел, кГц:</span></div>
+<canvas id="cg" width="720" height="390"></canvas>
+<label id="lc" hidden>Положение для спектра<input id="rc_old" type="range" min="0" max="100" value="50"></label>
+
+<div id="formantBox" class="card">
+<h2 style="margin-top:0">Форманты выбранного участка</h2>
+<div class="grid">
+<div class="metric"><span class="m">F1</span><b id="f1v">—</b></div>
+<div class="metric"><span class="m">F2</span><b id="f2v">—</b></div>
+<div class="metric"><span class="m">F3</span><b id="f3v">—</b></div>
+</div>
+<small>F1–F3 являются оценкой по LPC-спектральной огибающей и локальным спектральным пикам.</small>
+</div>
+<p id="info" class="m status"></p>
+</div>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const AC=window.AudioContext||window.webkitAudioContext;
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let ctx=null,S=null,tab=0,FMAX=8000,drawTimer=0;
+
+function play(x,sr){
+ ctx=ctx||new AC();ctx.resume();
+ const b=ctx.createBuffer(1,x.length,sr);b.copyToChannel(x,0);
+ const o=ctx.createBufferSource();o.buffer=b;o.connect(ctx.destination);o.start();
+}
+function show(d,sr){
+ S={d,sr};$('ws').hidden=false;$('ra').value=0;$('rb').value=100;
+ $('st').textContent='Длина '+(d.length/sr).toFixed(2)+' с. Выделите нужный фрагмент.';
+ drawWave();draw();
+}
+async function load(buf){
+ ctx=ctx||new AC();await ctx.resume();
+ const ab=await ctx.decodeAudioData(buf),d=new Float32Array(ab.length);
+ if(ab.numberOfChannels===1)d.set(ab.getChannelData(0));
+ else for(let i=0;i<ab.length;i++){let v=0;for(let c=0;c<ab.numberOfChannels;c++)v+=ab.getChannelData(c)[i];d[i]=v/ab.numberOfChannels}
+ show(d,ab.sampleRate);
+}
+function seg(){
+ const n=S.d.length,A=+$('ra').value/100,B=Math.min(1,Math.max(+$('rb').value/100,A+.005));
+ return S.d.subarray(Math.floor(n*A),Math.floor(n*B));
+}
+$('fi').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;try{await load(await f.arrayBuffer())}catch(x){$('st').textContent='Не удалось прочитать файл.'}};
+$('pl').onclick=()=>play(seg(),S.sr);
+
+['Форма','Спектр','Спектрограмма'].forEach((t,i)=>{
+ const b=document.createElement('button');b.textContent=t;if(!i)b.className='on';
+ b.onclick=()=>{tab=i;[...$('tabs').children].forEach((c,j)=>c.classList.toggle('on',j===i));
+ $('lc').hidden=i!==1;$('fr').hidden=i!==1&&i!==2;
+ $('f0box').hidden=false;$('formantBox').hidden=i!==0&&i!==1;if(S)draw()};
+ $('tabs').appendChild(b);
+});
+$('lc').hidden=true;
+[8,12,16].forEach(k=>{
+ const b=document.createElement('button');b.textContent=k;
+ if(k===8)b.className='on';
+ b.onclick=()=>{FMAX=k*1000;[...$('fr').querySelectorAll('button')].forEach(c=>c.classList.toggle('on',c===b));if(S)draw()};
+ $('fr').appendChild(b);
+});
+
+function fft(re,im){
+ const n=re.length;
+ for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){let z=re[i];re[i]=re[j];re[j]=z;z=im[i];im[i]=im[j];im[j]=z}}
+ for(let l=2;l<=n;l<<=1){const a=-2*Math.PI/l;
+  for(let i=0;i<n;i+=l)for(let k=0;k<l/2;k++){const c=Math.cos(a*k),s=Math.sin(a*k),u=i+k,v=u+l/2;
+   const tr=re[v]*c-im[v]*s,ti=re[v]*s+im[v]*c;re[v]=re[u]-tr;im[v]=im[u]-ti;re[u]+=tr;im[u]+=ti}
+ }
+}
+function mag(x,st,N){
+ const re=new Float32Array(N),im=new Float32Array(N);
+ for(let i=0;i<N;i++)re[i]=(x[st+i]||0)*(.5-.5*Math.cos(2*Math.PI*i/(N-1)));
+ fft(re,im);const m=new Float32Array(N/2);
+ for(let i=0;i<N/2;i++)m[i]=20*Math.log10(Math.hypot(re[i],im[i])/N*2+1e-12);
+ return m;
+}
+function median(a){const v=a.filter(Number.isFinite).slice().sort((x,y)=>x-y);return v.length?v[Math.floor(v.length/2)]:NaN}
+
+function lpcCoeffs(x,p=12){
+ const r=new Float64Array(p+1);
+ for(let k=0;k<=p;k++){let s=0;for(let i=k;i<x.length;i++)s+=x[i]*x[i-k];r[k]=s}
+ if(r[0]<1e-12)return null;
+ const a=new Float64Array(p+1);a[0]=1;let e=r[0];
+ for(let i=1;i<=p;i++){let acc=r[i];for(let j=1;j<i;j++)acc+=a[j]*r[i-j];
+  let k=-acc/Math.max(e,1e-12);k=Math.max(-.98,Math.min(.98,k));const old=a.slice();a[i]=k;
+  for(let j=1;j<i;j++)a[j]=old[j]+k*old[i-j];e*=1-k*k;if(e<1e-12)break}
+ return a;
+}
+function lpcEnvelope(frame,sr,maxHz){
+ const a=lpcCoeffs(frame,12);if(!a)return null;const N=1024,out=new Float32Array(N/2),hz=sr/N,K=Math.min(N/2,Math.floor(maxHz/hz));
+ for(let i=0;i<K;i++){const f=i*hz,w=-2*Math.PI*f/sr;let re=1,im=0;
+  for(let k=1;k<a.length;k++){re+=a[k]*Math.cos(w*k);im+=a[k]*Math.sin(w*k)}
+  out[i]=-20*Math.log10(Math.max(Math.hypot(re,im),1e-9))}
+ return {v:out,hz,K};
+}
+function formants(x,sr,p=.5){
+ const N=2048;if(x.length<N)return [null,null,null];
+ const st=Math.max(0,Math.min(x.length-N,Math.floor((x.length-N)*p))),frame=new Float64Array(N);
+ let mean=0;for(let i=0;i<N;i++)mean+=x[st+i];mean/=N;
+ for(let i=0;i<N;i++)frame[i]=(x[st+i]-mean)*(.54-.46*Math.cos(2*Math.PI*i/(N-1)));
+ const env=lpcEnvelope(frame,sr,5000);if(!env)return [null,null,null];const hz=env.hz,smooth=new Float32Array(env.K),sw=Math.max(1,Math.round(35/hz));
+ for(let i=0;i<env.K;i++){let s=0,n=0;for(let j=Math.max(0,i-sw);j<=Math.min(env.K-1,i+sw);j++){s+=env.v[j];n++}smooth[i]=s/n}
+ const lp=[],min=Math.max(1,Math.ceil(250/hz)),max=Math.min(env.K-2,Math.floor(5000/hz));
+ for(let i=min;i<=max;i++)if(smooth[i]>smooth[i-1]&&smooth[i]>=smooth[i+1])lp.push({f:i*hz,h:smooth[i]});
+ const mv=mag(frame,0,N),bh=sr/N,sh=new Float32Array(mv.length),sw2=Math.max(1,Math.round(40/bh));
+ for(let i=0;i<mv.length;i++){let s=0,n=0;for(let j=Math.max(0,i-sw2);j<=Math.min(mv.length-1,i+sw2);j++){s+=mv[j];n++}sh[i]=s/n}
+ const sp=[],mi=Math.max(1,Math.ceil(250/bh)),ma=Math.min(sh.length-2,Math.floor(5000/bh));
+ for(let i=mi;i<=ma;i++)if(sh[i]>sh[i-1]&&sh[i]>=sh[i+1])sp.push({f:i*bh,h:sh[i]});
+ const norm=a=>{if(!a.length)return a;let mn=Infinity,mx=-Infinity;for(const q of a){mn=Math.min(mn,q.h);mx=Math.max(mx,q.h)}const d=Math.max(1e-9,mx-mn);return a.map(q=>({...q,h:(q.h-mn)/d}))};
+ const L=norm(lp),P=norm(sp),score=q=>q.h;
+ const choose=(a,lo,hi,used)=>a.filter(q=>q.f>=lo&&q.f<=hi&&!used.some(u=>Math.abs(q.f-u.f)<u.g)).sort((a,b)=>score(b)-score(a))[0]||null;
+ const used=[];let f1=choose(L,250,1000,used)||choose(P,250,1000,used);if(!f1)return [null,null,null];used.push({f:f1.f,g:180});
+ let f2=choose(L,Math.max(650,f1.f+180),3300,used)||choose(P,Math.max(650,f1.f+180),3300,used);if(!f2)return [Math.round(f1.f),null,null];used.push({f:f2.f,g:120});
+ const c=[];for(const q of L){if(q.f<Math.max(1500,f2.f+70)||q.f>5000||used.some(u=>Math.abs(q.f-u.f)<u.g))continue;
+  let best=null,bd=180;for(const s of P){const d=Math.abs(s.f-q.f);if(d<=bd){bd=d;best=s}}
+  c.push({f:best?q.f*.65+best.f*.35:q.f,score:q.h*.55+(best?best.h*.35+(1-bd/180)*.8:0)});
+ }
+ c.sort((a,b)=>b.score-a.score);return [Math.round(f1.f),Math.round(f2.f),c[0]&&c[0].score>=.12?Math.round(c[0].f):null];
+}
+
+function f0Frame(x,sr,p=.5){
+ const N=2048;if(x.length<N)return NaN;
+ const st=Math.max(0,Math.min(x.length-N,Math.floor((x.length-N)*p))),z=new Float64Array(N);let mean=0;
+ for(let i=0;i<N;i++)mean+=x[st+i];mean/=N;
+ for(let i=0;i<N;i++){const w=.54-.46*Math.cos(2*Math.PI*i/(N-1));z[i]=(x[st+i]-mean)*w}
+ const minF=60,maxF=550,lo=Math.floor(sr/maxF),hi=Math.min(Math.floor(sr/minF),N-2);let e=0;for(const v of z)e+=v*v;
+ if(e/N<1e-5)return NaN;let best=-1,bL=0;
+ for(let l=lo;l<=hi;l++){let c=0;for(let i=0;i<N-l;i++)c+=z[i]*z[i+l];c/=e;if(c>best){best=c;bL=l}}
+ if(best<.35)return NaN;
+ let d=0;if(bL>lo&&bL<hi){const corr=l=>{let c=0;for(let i=0;i<N-l;i++)c+=z[i]*z[i+l];return c/e};
+  const ym=corr(bL-1),yp=corr(bL+1),den=ym-2*best+yp;if(Math.abs(den)>1e-9)d=.5*(ym-yp)/den}
+ return sr/(bL+d);
+}
+function pitch(x,sr){
+ const N=2048,hop=Math.max(128,N*.25),out=[];
+ for(let s=0;s+N<=x.length;s+=hop)out.push(f0Frame(x,sr,(s+(N/2))/(x.length)));
+ return out;
+}
+function harmonics(f0,maxHz){const a=[];if(!Number.isFinite(f0))return a;for(let n=1;n*f0<=maxHz;n++)a.push([n,n*f0]);return a}
+
+function specCurve(x,sr,p,fm){
+ const N=2048,st=Math.max(0,Math.min(x.length-N,Math.floor((x.length-N)*p))),m=mag(x,st,N),hz=sr/N,K=Math.min(N/2,Math.floor(fm/hz)),v=m.subarray(0,K),e=new Float32Array(K),w=Math.max(1,Math.round(60/hz));
+ for(let i=0;i<K;i++){let s=0,c=0;for(let j=Math.max(0,i-w);j<=Math.min(K-1,i+w);j++){s+=v[j];c++}e[i]=s/c}
+ return {v,e,hz,mx:Math.max(...e),fmax:K*hz};
+}
+function sgram(x,sr){
+ const N=512,H=128,F=Math.min(N/2,Math.floor(FMAX/(sr/N))),C=Math.max(1,Math.floor((x.length-N)/H)+1),g=[];
+ for(let c=0;c<C;c++)g.push(mag(x,c*H,N).subarray(0,F));return g;
+}
+function bars(g,x,W,H,col,a){let mx=0;for(const v of x)mx=Math.max(mx,Math.abs(v));mx=Math.max(mx,1e-9);g.fillStyle=col;g.globalAlpha=a;const k=x.length/W;
+ for(let i=0;i<W;i+=2){let lo=1,hi=-1,aa=Math.floor(i*k),bb=Math.min(x.length,Math.floor((i+2)*k));for(let j=aa;j<bb;j++){const v=x[j]/mx;lo=Math.min(lo,v);hi=Math.max(hi,v)}if(hi>=lo)g.fillRect(i,H/2*(1-hi),2,Math.max(1,H/2*(hi-lo)))}g.globalAlpha=1}
+function plot(g,W,H,v,y0,y1,col,lw,al){g.strokeStyle=col;g.lineWidth=lw;g.globalAlpha=al;g.beginPath();let up=false,n=Math.max(1,v.length-1);
+ for(let i=0;i<v.length;i++){const u=v[i];if(!Number.isFinite(u)){up=false;continue}const X=i/n*W,Y=H-(u-y0)/(y1-y0)*H;up?g.lineTo(X,Y):g.moveTo(X,Y);up=true}g.stroke();g.globalAlpha=1}
+function tstep(d){return d<=.6?.1:d<=1.2?.2:d<=3?.5:d<=6?1:2}
+function otick(g,W,H,d){const st=tstep(d);g.save();g.fillStyle=css('--fg');for(let t=st;t<d-st*.3;t+=st){const X=t/d*W;g.globalAlpha=.2;g.fillRect(X,0,1,H);g.globalAlpha=1;g.fillText(String(Math.round(t*10)/10).replace('.',','),X+4,H-8)}g.restore()}
+
+function drawWave(){
+ const cv=$('cw'),g=cv.getContext('2d'),W=cv.width,H=cv.height;g.clearRect(0,0,W,H);bars(g,S.d,W,H,css('--acc'),.9);
+ const A=+$('ra').value/100,B=Math.max(+$('rb').value/100,A+.005);g.fillStyle=css('--ref');g.globalAlpha=.25;g.fillRect(A*W,0,(B-A)*W,H);g.globalAlpha=1;
+ if(tab===1){const n=S.d.length,a=Math.floor(n*A),b=Math.floor(n*B),c=a+Math.floor((b-a)*$('rc').value/100);g.fillStyle=css('--fg');g.fillRect(c/n*W-1,0,3,H)}
+}
+function drawSpectrum(g,x,sr,W,H,p){
+ const a=specCurve(x,sr,p,FMAX),FM=a.fmax,lo=a.mx-70,hi=a.mx+3;plot(g,W,H,a.v,lo,hi,css('--acc'),1,.45);plot(g,W,H,a.e,lo,hi,css('--acc'),3,1);
+ const f0=f0Frame(x,sr,p),hs=harmonics(f0,FM);
+ g.strokeStyle=css('--ref');g.fillStyle=css('--ref');g.lineWidth=1;
+ hs.forEach(([n,f])=>{const X=f/FM*W;g.globalAlpha=n===1?.9:.35;g.fillRect(X,0,1,H);if(n<=12){g.globalAlpha=.9;g.fillText('H'+n,X+3,18+(n%2)*15)}});
+ g.globalAlpha=1;
+ const fs=formants(x,sr,p);fs.forEach((f,i)=>{if(!f||f>FM)return;const X=f/FM*W;g.fillStyle=css('--fg');g.fillRect(X,0,2,H);g.fillText('F'+(i+1)+' '+f,X+5,70+i*22)});
+ g.fillStyle=css('--fg');g.globalAlpha=.25;const st=FM<=9000?1000:2000;for(let k=st;k<FM;k+=st){const X=k/FM*W;g.fillRect(X,0,1,H);g.globalAlpha=1;g.fillText(k/1000+'',X+3,H-8);g.globalAlpha=.25}g.globalAlpha=1;g.fillText('0',4,H-8);g.fillText(Math.round(FM/1000)+' кГц',W-75,H-8);
+ return {f0,fs};
+}
+function drawSG(g,x,sr,Y,H){
+ const G=sgram(x,sr),C=G.length,F=G[0]?.length||1;if(!C)return;let mx=-Infinity;for(const c of G)for(const v of c)mx=Math.max(mx,v);
+ const o=document.createElement('canvas');o.width=C;o.height=F;const og=o.getContext('2d'),im=og.createImageData(C,F),bot=mx-70;
+ for(let c=0;c<C;c++)for(let f=0;f<F;f++){const v=Math.max(0,Math.min(1,(G[c][f]-bot)/70)),p=((F-1-f)*C+c)*4;im.data[p]=255*v;im.data[p+1]=255*Math.max(0,(v-.45)*1.8);im.data[p+2]=255*(1-v)*.9;im.data[p+3]=255}og.putImageData(im,0,0);
+ const ML=58,MR=10,W=720-ML-MR;g.drawImage(o,ML,Y,W,H);g.fillStyle=css('--fg');g.textAlign='right';const maxF=F*sr/512,step=maxF<=9000?1000:2000;
+ for(let k=0;k<=maxF;k+=step){const y=Y+H-k/maxF*H;g.globalAlpha=.3;g.fillRect(ML,y,W,1);g.globalAlpha=1;g.fillText((k/1000).toFixed(0),ML-7,Math.min(Y+H,Math.max(Y+12,y+5)))}g.textAlign='left';
+}
+function updateF0Panel(x){
+ const p=pitch(x,S.sr),md=median(p),f0=f0Frame(x,S.sr,+$('rc').value/100),vo=p.filter(Number.isFinite).length;
+ $('f0v').textContent=Number.isFinite(f0)?f0.toFixed(1)+' Гц':'—';
+ $('f0med').textContent=Number.isFinite(md)?md.toFixed(1)+' Гц':'—';
+ $('voiced').textContent=Math.round(100*vo/Math.max(1,p.length))+'%';
+ const hs=harmonics(f0,FMAX);
+ $('harm').textContent=hs.length?'Гармоники выбранной точки: '+hs.slice(0,20).map(q=>'H'+q[0]+'='+q[1].toFixed(0)+' Гц').join(' · '):'F0 не определена — гармоники не рассчитываются.';
+}
+
+function draw(){
+ if(!S)return;const cv=$('cg'),g=cv.getContext('2d'),W=cv.width,x=seg(),C=css('--acc'),fg=css('--fg');cv.height=tab===2?390:390;const H=cv.height;g.clearRect(0,0,W,H);g.font='16px system-ui';g.fillStyle=fg;
+ if(x.length<1024){['f0v','f0med','voiced','harm'].forEach(id=>$(id).textContent='—');g.fillText('Фрагмент слишком короткий для анализа',18,35);return}
+ updateF0Panel(x);
+ if(tab===0){
+  bars(g,x,W,H,C,.9);otick(g,W,H,x.length/S.sr);const fs=formants(x,S.sr);
+  ['f1v','f2v','f3v'].forEach((id,i)=>$(id).textContent=fs[i]?fs[i]+' Гц':'—');
+  $('info').textContent='Форма волны. F1–F3: '+fs.map((v,i)=>'F'+(i+1)+'='+(v||'—')+' Гц').join(', ');
+ }else if(tab===1){
+  const p=+$('rc').value/100,a=drawSpectrum(g,x,S.sr,W,H,p),fs=a.fs;
+  ['f1v','f2v','f3v'].forEach((id,i)=>$(id).textContent=fs[i]?fs[i]+' Гц':'—');
+  $('f0v').textContent=Number.isFinite(a.f0)?a.f0.toFixed(1)+' Гц':'—';
+  $('info').textContent='Спектр FFT + сглаженная LPC-огибающая. Красные вертикальные линии: Hn=n·F0. Чёрные: оценка F1–F3.';
+ }else if(tab===2){
+  ['f1v','f2v','f3v'].forEach(id=>$(id).textContent='—');drawSG(g,x,S.sr,10,H-55);$('info').textContent='Спектрограмма: время по горизонтали, частота по вертикали.';
+ }
+}
+function redraw(){clearTimeout(drawTimer);drawTimer=setTimeout(()=>{if(S){drawWave();draw()}},30)}
+['ra','rb','rc'].forEach(id=>$(id).oninput=redraw);
+</script>
+</main></body></html>
